@@ -2,14 +2,22 @@ import BLOG from '@/blog.config'
 import { getPostBlocks } from '@/lib/notion'
 import { getGlobalNotionData } from '@/lib/notion/getNotionData'
 import { useGlobal } from '@/lib/global'
-import * as ThemeMap from '@/themes'
-import React from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { idToUuid } from 'notion-utils'
-import Router from 'next/router'
+import { useRouter } from 'next/router'
 import { isBrowser } from '@/lib/utils'
 import { getNotion } from '@/lib/notion/getNotion'
 import { getPageTableOfContents } from '@/lib/notion/getPageTableOfContents'
 import md5 from 'js-md5'
+import dynamic from 'next/dynamic'
+import Loading from '@/components/Loading'
+
+const layout = 'LayoutSlug'
+
+/**
+ * 懒加载默认主题
+ */
+const DefaultLayout = dynamic(() => import(`@/themes/${BLOG.THEME}/${layout}`), { ssr: true })
 
 /**
  * 根据notion的slug访问页面
@@ -17,50 +25,29 @@ import md5 from 'js-md5'
  * @returns
  */
 const Slug = props => {
-  const { theme, changeLoadingState } = useGlobal()
-  const ThemeComponents = ThemeMap[theme]
+  const { theme, setOnLoading } = useGlobal()
   const { post, siteInfo } = props
-  const router = Router.useRouter()
+  const router = useRouter()
+  const [Layout, setLayout] = useState(DefaultLayout)
+
+  // 切换主题
+  useEffect(() => {
+    const loadLayout = async () => {
+      const newLayout = await dynamic(() => import(`@/themes/${theme}/${layout}`))
+      setLayout(newLayout)
+    }
+    loadLayout()
+  }, [theme])
 
   // 文章锁🔐
-  const [lock, setLock] = React.useState(post?.password && post?.password !== '')
-
-  React.useEffect(() => {
-    changeLoadingState(false)
-    if (post?.password && post?.password !== '') {
-      setLock(true)
-    } else {
-      if (!lock && post?.blockMap?.block) {
-        post.content = Object.keys(post.blockMap.block)
-        post.toc = getPageTableOfContents(post, post.blockMap)
-      }
-
-      setLock(false)
-    }
-  }, [post])
-
-  if (!post) {
-    setTimeout(() => {
-      if (isBrowser()) {
-        const article = document.getElementById('container')
-        if (!article) {
-          router.push('/404').then(() => {
-            console.warn('找不到页面', router.asPath)
-          })
-        }
-      }
-    }, 8 * 1000) // 404时长 8秒
-    const meta = { title: `${props?.siteInfo?.title || BLOG.TITLE} | loading`, image: siteInfo?.pageCover || BLOG.HOME_BANNER_IMAGE }
-    return <ThemeComponents.LayoutSlug {...props} showArticleInfo={true} meta={meta} />
-  }
+  const [lock, setLock] = useState(post?.password && post?.password !== '')
 
   /**
-   * 验证文章密码
-   * @param {*} result
-   */
+     * 验证文章密码
+     * @param {*} result
+     */
   const validPassword = passInput => {
     const encrypt = md5(post.slug + passInput)
-
     if (passInput && encrypt === post.password) {
       setLock(false)
       return true
@@ -68,25 +55,52 @@ const Slug = props => {
     return false
   }
 
-  props = { ...props, lock, setLock, validPassword }
+  // 文章加载
+  useEffect(() => {
+    setOnLoading(false)
+    // 404
+    if (!post) {
+      setTimeout(() => {
+        if (isBrowser()) {
+          const article = document.getElementById('notion-article')
+          if (!article) {
+            router.push('/404').then(() => {
+              console.warn('找不到页面', router.asPath)
+            })
+          }
+        }
+      }, 8 * 1000) // 404时长 8秒
+    }
+
+    // 文章加密
+    if (post?.password && post?.password !== '') {
+      setLock(true)
+    } else {
+      if (!lock && post?.blockMap?.block) {
+        post.content = Object.keys(post.blockMap.block).filter(key => post.blockMap.block[key]?.value?.parent_id === post.id)
+        post.toc = getPageTableOfContents(post, post.blockMap)
+      }
+      setLock(false)
+    }
+    router.events.on('routeChangeComplete', () => {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    })
+  }, [post])
 
   const meta = {
-    title: `${post?.title} | ${siteInfo?.title}`,
+    title: post ? `${post?.title} | ${siteInfo?.title}` : `${props?.siteInfo?.title || BLOG.TITLE} | loading`,
     description: post?.summary,
     type: post?.type,
     slug: post?.slug,
-    image: post?.page_cover,
+    image: post?.page_cover || (siteInfo?.pageCover || BLOG.HOME_BANNER_IMAGE),
     category: post?.category?.[0],
     tags: post?.tags
   }
+  props = { ...props, lock, meta, setLock, validPassword }
 
-  Router.events.on('routeChangeComplete', () => {
-    window.scrollTo({ top: 0, behavior: 'smooth' })
-  })
-
-  return (
-    <ThemeComponents.LayoutSlug {...props} showArticleInfo={true} meta={meta} />
-  )
+  return <Suspense fallback={<Loading />}>
+        <Layout {...props} />
+    </Suspense>
 }
 
 export async function getStaticPaths() {
@@ -114,25 +128,31 @@ export async function getStaticProps({ params: { slug } }) {
   }
   const from = `slug-props-${fullSlug}`
   const props = await getGlobalNotionData({ from })
-  props.post = props.allPages.find((p) => {
+  // 在列表内查找文章
+  props.post = props?.allPages?.find((p) => {
     return p.slug === fullSlug || p.id === idToUuid(fullSlug)
   })
 
-  if (!props.post) {
+  // 处理非列表内文章的内信息
+  if (!props?.post) {
     const pageId = slug.slice(-1)[0]
-    if (pageId.length < 32) {
-      return { props, revalidate: parseInt(BLOG.NEXT_REVALIDATE_SECOND) }
-    }
-    const post = await getNotion(pageId)
-    if (post) {
+    if (pageId.length >= 32) {
+      const post = await getNotion(pageId)
       props.post = post
-    } else {
-      return { props, revalidate: parseInt(BLOG.NEXT_REVALIDATE_SECOND) }
     }
-  } else {
-    props.post.blockMap = await getPostBlocks(props.post.id, 'slug')
   }
 
+  // 无法获取文章
+  if (!props?.post) {
+    return { props, revalidate: parseInt(BLOG.NEXT_REVALIDATE_SECOND) }
+  }
+
+  // 文章内容加载
+  if (!props?.posts?.blockMap) {
+    props.post.blockMap = await getPostBlocks(props.post.id, from)
+  }
+
+  // 推荐关联文章处理
   const allPosts = props.allPages.filter(page => page.type === 'Post' && page.status === 'Published')
   if (allPosts && allPosts.length > 0) {
     const index = allPosts.indexOf(props.post)
