@@ -2,6 +2,7 @@ name: Upstream Sync
 
 permissions:
   contents: write
+  pull-requests: write
 
 on:
   schedule:
@@ -15,25 +16,75 @@ jobs:
     if: ${{ github.event.repository.fork }}
 
     steps:
-      # Step 1: run a standard checkout action
       - name: Checkout target repo
         uses: actions/checkout@v4
-
-      # Step 2: run the sync action
-      - name: Sync upstream changes
-        id: sync
-        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
-          upstream_sync_repo: tangly1024/NotionNext
-          upstream_sync_branch: main
-          target_sync_branch: main
-          target_repo_token: ${{ secrets.GITHUB_TOKEN }} # automatically generated, no need to set
+          fetch-depth: 0
 
-          # Set test_mode true to run tests instead of the true action!!
-          test_mode: false
-
-      - name: Sync check
-        if: failure()
+      - name: Merge upstream into sync branch
+        id: merge
         run: |
-          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次。"
-          exit 1
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/tangly1024/NotionNext.git
+          git fetch origin main
+          git fetch upstream main
+
+          git checkout -B upstream-sync origin/main
+          git merge --no-edit upstream/main
+
+          # 保留你仓库中的个性化配置，避免被上游覆盖
+          git checkout origin/main -- blog.config.js conf/ || true
+
+          if git diff --quiet origin/main..HEAD; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream updates to sync."
+            exit 0
+          fi
+
+          git push --force-with-lease origin upstream-sync
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update sync PR
+        if: steps.merge.outputs.has_changes == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner
+            const repo = context.repo.repo
+            const head = `${owner}:upstream-sync`
+            const base = 'main'
+            const title = 'chore: sync upstream updates'
+            const body = [
+              '自动同步上游仓库最新变更到 `upstream-sync` 分支。',
+              '',
+              '- 该 PR 不会直接改动受保护的 `main` 分支',
+              '- 已优先保留本仓库配置文件（`blog.config.js` 与 `conf/`）',
+              '- 合并前请在 PR 中确认站点配置和页面行为'
+            ].join('\n')
+
+            const prs = await github.rest.pulls.list({
+              owner,
+              repo,
+              state: 'open',
+              head,
+              base
+            })
+
+            if (prs.data.length > 0) {
+              core.info(`PR already exists: #${prs.data[0].number}`)
+              return
+            }
+
+            const pr = await github.rest.pulls.create({
+              owner,
+              repo,
+              head: 'upstream-sync',
+              base,
+              title,
+              body
+            })
+            core.info(`Created PR #${pr.data.number}`)
