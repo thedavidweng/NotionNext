@@ -33,7 +33,7 @@ jobs:
           git fetch upstream main
 
           git checkout -B upstream-sync origin/main
-          git merge --no-edit upstream/main
+          git merge -X theirs --no-edit upstream/main
 
           # 保留你仓库中的个性化配置，避免被上游覆盖
           git checkout origin/main -- blog.config.js conf/ || true
