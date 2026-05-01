@@ -6,7 +6,7 @@ permissions:
 
 on:
   schedule:
-    - cron: "0 0 * * *" # every day
+    - cron: '0 0 * * *' # every day
   workflow_dispatch:
 
 jobs:
@@ -55,7 +55,7 @@ jobs:
           script: |
             const owner = context.repo.owner
             const repo = context.repo.repo
-            const head = `${owner}:upstream-sync`
+            const head = 'upstream-sync'
             const base = 'main'
             const title = 'chore: sync upstream updates'
             const body = [
@@ -70,7 +70,7 @@ jobs:
               owner,
               repo,
               state: 'open',
-              head,
+              head: `${owner}:${head}`,
               base
             })
 
